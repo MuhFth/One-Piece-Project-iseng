@@ -1,33 +1,97 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
-from wordcloud import WordCloud
-import plotly.express as px
-import pandas as pd
-def plot_bar_distribution(df):
-    fig, ax = plt.subplots()
-    sns.countplot(x="sentiment", data=df, palette="Set2", ax=ax)
-    ax.set_title("Distribusi Sentimen (Bar Chart)")
-    ax.set_xlabel("Sentimen")
-    ax.set_ylabel("Jumlah Tweet")
-    return fig
+# add these imports at top of visuals/charts.py if not present
+import os
+import numpy as np
+from PIL import Image, ImageOps, ImageFilter
+from wordcloud import WordCloud, STOPWORDS
+import nltk
+from nltk.corpus import stopwords as nltk_stopwords
+import re
+from collections import Counter
 
-def plot_pie_chart(df):
-    data = df["sentiment"].value_counts()
-    fig, ax = plt.subplots()
-    ax.pie(data, labels=data.index, autopct="%1.1f%%", startangle=90, colors=["#00c49a", "#ff6b6b", "#fdd835"])
-    ax.set_title("Proporsi Sentimen (Pie Chart)")
-    return fig
+# ensure Indonesian stopwords loaded once
+try:
+    IND_STOPWORDS = set(nltk_stopwords.words("indonesian"))
+except Exception:
+    # fallback: small custom list if NLTK indonesian missing
+    IND_STOPWORDS = {"dan","di","ke","yang","ini","itu","dengan","ga","yg","yg","rt","amp"}
 
-def generate_wordcloud(texts, sentiment_label):
-    text = " ".join(texts)
-    wc = WordCloud(width=800, height=400, background_color="white").generate(text)
-    return wc.to_image()
+# Helper: default circular mask if no custom mask provided
+def _make_circle_mask(size=800, blur=10):
+    # size: pixel width/height of square image
+    x = np.arange(0, size)
+    y = np.arange(0, size)[:, None]
+    cx, cy = size // 2, size // 2
+    r = size // 2 - 10
+    circle = ((x - cx) ** 2 + (y - cy) ** 2) <= r ** 2
+    mask = 255 * circle.astype(np.uint8)
+    # convert to 3-channel (wordcloud expects 2D or 3D)
+    return mask
 
-def plot_sentiment_over_time(df):
-    if "date" not in df.columns:
-        return None
-    df["date"] = pd.to_datetime(df["date"])
-    df_grouped = df.groupby([df["date"].dt.date, "sentiment"]).size().reset_index(name='count')
-    fig = px.line(df_grouped, x="date", y="count", color="sentiment", markers=True,
-                title="Perubahan Sentimen dari Waktu ke Waktu")
-    return fig
+def _tokenize_and_filter(texts, extra_stopwords=None, min_len=3):
+    """
+    texts: iterable of strings
+    returns: Counter of tokens
+    """
+    # join and basic clean
+    s = " ".join([str(t).lower() for t in texts if isinstance(t, str)])
+    # remove urls, mentions, hashtags but keep meaningful hashtags by removing # only:
+    s = re.sub(r"http\S+|www\S+|@\w+", "", s)
+    s = re.sub(r"#", "", s)
+    # split on non-word chars
+    tokens = re.findall(r"\b[^\d\W]{%d,}\b" % min_len, s, flags=re.UNICODE)
+    # filter stopwords and very short tokens
+    stopset = set(STOPWORDS) | IND_STOPWORDS
+    if extra_stopwords:
+        stopset |= set([w.lower() for w in extra_stopwords])
+    tokens = [t for t in tokens if t not in stopset]
+    # optional: further stemming already done earlier in pipeline; if not, ok
+    return Counter(tokens)
+
+def generate_wordcloud(texts, sentiment_label, save_to_file=True,
+                    mask_path=None, max_words=200, colormap="tab20",
+                    background_color="white", prefer_horizontal=0.9,
+                    random_state=42):
+    """
+    texts: iterable/series of cleaned text strings (preferably after stem)
+    sentiment_label: used for filename
+    mask_path: optional path to PNG image to use as mask (white background, shape)
+    """
+    # Build freq dictionary
+    freqs = _tokenize_and_filter(texts, min_len=3)
+    if not freqs:
+        freqs = Counter({"no_data": 1})
+
+    # Prepare mask
+    mask = None
+    if mask_path and os.path.isfile(mask_path):
+        mask_img = Image.open(mask_path).convert("L")
+        mask = np.array(mask_img)
+    else:
+        # use circular mask by default
+        mask = _make_circle_mask(size=800)
+
+    wc = WordCloud(
+        width=1200,
+        height=800,
+        background_color=background_color,
+        max_words=max_words,
+        mask=mask,
+        colormap=colormap,
+        prefer_horizontal=prefer_horizontal,
+        contour_width=1,
+        contour_color="#333333",
+        random_state=random_state,
+        scale=2  # generate at higher resolution then downsample for crisp PNG
+    )
+
+    # If you want bigrams preserved, you could set collocations=True
+    wc.generate_from_frequencies(freqs)
+
+    # Save file
+    out_dir = os.path.dirname(__file__) or "visuals"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"wordcloud_{sentiment_label}.png")
+
+    wc.to_file(out_path)
+
+    return out_path
